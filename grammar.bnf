@@ -1,0 +1,20 @@
+# Color channel
+C ||  T
+  ||| add(C, C)
+  ||| mult(C, C)
+  ||| mult(C, 
+              mult(C,C))
+  | sqrt( 
+          abs ( C )
+        )
+  # ||| abs(C)
+  #||| sin(C)
+  ;
+
+# Terminal
+T | random
+  | u
+  | v
+  | t
+  ;
+
