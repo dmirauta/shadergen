@@ -2,15 +2,15 @@
 
 // TODO: Should probably use &str rather than &[u8], to support unicode, but its nice being able
 // to index the slice by a usize...
-
-use std::collections::HashMap;
+// TODO: either offload more work to nom or remove it? (could just implement the few functions used)
 
 use lazy_static::lazy_static;
 use nom::{
     bytes::{complete::take_while1, take_until},
     character::{char, complete::alphanumeric0},
-    AsChar, IResult, Parser,
+    AsChar, Parser,
 };
+use std::collections::HashMap;
 
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -55,11 +55,15 @@ lazy_static! {
 #[derive(Debug)]
 pub enum Term {
     RandConst,
+    /// horizontal parameter ranging in [0,1]
     U,
+    /// vertical parameter ranging in [0,1]
     V,
+    /// time
     T,
-    R, // sqrt(add(mult(u-0.5, u-0.5), mult(v-0.5, v-0.5)))
-       // TODO: add literal? (issue: variants currently derived from alphanumeric str)
+    /// radius from screen center, sqrt(add(mult(u-0.5, u-0.5), mult(v-0.5, v-0.5)))
+    R,
+    // TODO: add literal? (issue: variants currently derived from alphanumeric str)
 }
 
 impl Term {
@@ -74,9 +78,6 @@ impl Term {
         }
     }
 }
-
-/// returns the specified result, as well as leftover bytes (including on error)
-type PResult<'a, T> = IResult<&'a [u8], T>;
 
 fn _strip_comment(i: &[u8]) -> Option<&[u8]> {
     (char::<_, ()>('#'), take_until("\n"), char('\n'))
@@ -130,15 +131,42 @@ fn test_eat_whitespace_and_comments() {
     assert_eq!(o, "no comment".as_bytes())
 }
 
-// TODO: replace panics/expects with recoverable feedback (possibly with logs?)
-
 fn utf8str(i: &[u8]) -> String {
     String::from_utf8(i.to_vec()).unwrap()
 }
 
-pub fn parse_rewrite_rule(mut i: &[u8]) -> PResult<(String, RewriteRule)> {
+/// returns the specified result, as well as leftover bytes (but not on error)
+type PResult<'a, T> = Result<(&'a [u8], T), ParseFail>;
+
+#[allow(dead_code)]
+#[derive(Debug)]
+pub enum ParseFail {
+    EmptyExpression,
+    ExpectedIdentifier,
+    NoClosingBracket,
+    UnexpectedCharsAfterClosingBracket,
+    UnsupportedNumberOfFunctionArgs(usize),
+    WrongNumberOfFunctionArgs {
+        func: String,
+        expected: usize,
+        got: usize,
+    },
+    FunctionNotWhitelisted(String),
+}
+
+pub fn parse_rewrite_rules(mut i: &[u8]) -> Result<HashMap<String, RewriteRule>, ParseFail> {
     i = eat_whitespace_and_comments(i);
-    let (i_, rule_ident) = alphanumeric0::<_, ()>(i).expect("Expected rule name.");
+    let mut hs = HashMap::new();
+    while !i.is_empty() {
+        let (i_, (ident, rule)) = parse_rewrite_rule(i)?;
+        i = eat_whitespace_and_comments(i_);
+        hs.insert(ident, rule);
+    }
+    Ok(hs)
+}
+
+fn parse_rewrite_rule(mut i: &[u8]) -> PResult<(String, RewriteRule)> {
+    let (i_, rule_ident) = alphanumeric0::<_, ()>(i).map_err(|_| ParseFail::ExpectedIdentifier)?;
     let rule_ident = utf8str(rule_ident);
     dbg!(&rule_ident);
     i = i_;
@@ -152,7 +180,7 @@ pub fn parse_rewrite_rule(mut i: &[u8]) -> PResult<(String, RewriteRule)> {
                 break;
             }
             Err(_) => {
-                let (i_, branch) = parse_branch(i).expect("Invalid branch or missing \";\".");
+                let (i_, branch) = parse_branch(i)?;
                 i = i_;
                 branches.push(branch);
             }
@@ -163,10 +191,15 @@ pub fn parse_rewrite_rule(mut i: &[u8]) -> PResult<(String, RewriteRule)> {
 }
 
 fn parse_branch(i: &[u8]) -> PResult<Branch> {
-    let (i, bars) = take_while1(|u: u8| u.as_char() == '|').parse(i)?;
+    let (mut i, bars) = take_while1::<_, _, ()>(|u: u8| u.as_char() == '|')
+        .parse(i)
+        .unwrap();
     let weight = bars.len() as u8;
+    i = eat_whitespace_and_comments(i);
     let (mut i, in_branch) =
-        take_while1(|u: u8| !['|', ';', '#'].contains(&u.as_char())).parse(i)?;
+        take_while1::<_, _, ()>(|u: u8| !['|', ';', '#'].contains(&u.as_char()))
+            .parse(i)
+            .map_err(|_| ParseFail::EmptyExpression)?;
     i = eat_whitespace_and_comments(i);
     Ok((
         i,
@@ -177,26 +210,31 @@ fn parse_branch(i: &[u8]) -> PResult<Branch> {
     ))
 }
 
-fn check_function(ident: &str, given_nargs: usize) {
-    match FUNCTION_WHITELIST.get(&ident) {
-        Some(nargs) => {
-            if *nargs != given_nargs {
-                panic!("\"{ident}\" requires {nargs} arguments but {given_nargs} were given.");
+macro_rules! check_function {
+    ($id: expr, $given_nargs: tt) => {
+        match FUNCTION_WHITELIST.get(&$id.as_str()) {
+            Some(&expected) => {
+                if expected != $given_nargs {
+                    return Err(ParseFail::WrongNumberOfFunctionArgs {
+                        func: $id,
+                        expected,
+                        got: $given_nargs,
+                    });
+                }
+            }
+            None => {
+                return Err(ParseFail::FunctionNotWhitelisted($id));
             }
         }
-        None => {
-            panic!("\"{ident}\" is not whitelisted (may or may not exist in glsl).")
-        }
-    }
+    };
 }
 
 fn parse_expr(mut i: &[u8]) -> PResult<Expression> {
     i = eat_whitespace_and_comments(i);
-    let (i_, ident) =
-        alphanumeric0::<_, ()>(i).expect("Expected the expression to start with an identifier.");
+    let (i_, ident) = alphanumeric0::<_, ()>(i).unwrap();
     let ident = utf8str(ident);
     if ident.is_empty() {
-        panic!("Empty rule found (will ignore).");
+        return Err(ParseFail::ExpectedIdentifier);
     }
     i = i_;
     match parse_brackets_inner(i) {
@@ -205,26 +243,23 @@ fn parse_expr(mut i: &[u8]) -> PResult<Expression> {
             None => Ok((i, Expression::ToBeReplaced { rule: ident })),
         },
         ParseBracketsOutcome::Success(i) => {
-            let args = split_arglist(i);
-            let mut args: Vec<_> = args
-                .into_iter()
-                .enumerate()
-                .map(|(j, i)| {
-                    let (_, arg) = parse_expr(i)
-                        .unwrap_or_else(|_| panic!("Invalid expr as arg {j} of {ident}"));
-                    Box::new(arg)
-                })
-                .collect();
+            let argsi = split_arglist(i);
+            let mut args = vec![];
+            for (j, i) in argsi.into_iter().enumerate() {
+                println!("Invalid expr as arg {j} of {ident}"); // TODO: Log more verbose info
+                let (_, arg) = parse_expr(i)?;
+                args.push(Box::new(arg))
+            }
             let expr = match args.len() {
                 1 => {
-                    check_function(ident.as_str(), 1);
+                    check_function!(ident, 1);
                     Expression::Func1 {
                         ident,
                         args: [args.pop().unwrap()],
                     }
                 }
                 2 => {
-                    check_function(ident.as_str(), 2);
+                    check_function!(ident, 2);
                     let arg2 = args.pop().unwrap();
                     let arg1 = args.pop().unwrap();
                     Expression::Func2 {
@@ -233,7 +268,7 @@ fn parse_expr(mut i: &[u8]) -> PResult<Expression> {
                     }
                 }
                 3 => {
-                    check_function(ident.as_str(), 3);
+                    check_function!(ident, 3);
                     let arg3 = args.pop().unwrap();
                     let arg2 = args.pop().unwrap();
                     let arg1 = args.pop().unwrap();
@@ -242,13 +277,12 @@ fn parse_expr(mut i: &[u8]) -> PResult<Expression> {
                         args: [arg1, arg2, arg3],
                     }
                 }
-                n => panic!("functions with {n} arguments are not supported (expecting 1,2 or 3)"),
+                n => return Err(ParseFail::UnsupportedNumberOfFunctionArgs(n)),
             };
             Ok((i, expr))
         }
-        e => {
-            panic!("Parse brackets error: {e:?}")
-        }
+        ParseBracketsOutcome::NoClosing => Err(ParseFail::NoClosingBracket),
+        ParseBracketsOutcome::ExtraTokens => Err(ParseFail::UnexpectedCharsAfterClosingBracket),
     }
 }
 
