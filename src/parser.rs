@@ -3,6 +3,7 @@
 // TODO: Should probably use &str rather than &[u8], to support unicode, but its nice being able
 // to index the slice by a usize...
 // TODO: either offload more work to nom or remove it? (could just implement the few functions used)
+// TODO: Highlight location in source where parsing failed.
 
 use lazy_static::lazy_static;
 use nom::{
@@ -10,21 +11,30 @@ use nom::{
     character::{char, complete::alphanumeric0},
     AsChar, Parser,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-#[allow(dead_code)]
 #[derive(Debug)]
-pub struct RewriteRule(Vec<Branch>);
-
-#[allow(dead_code)]
-#[derive(Debug)]
-pub struct Branch {
-    weight: u8,
-    expr: Expression,
+pub struct RewriteRule {
+    pub branches: Vec<Branch>,
+    /// indeces of branches that replace with a purely terminal rule, we can use these when we
+    /// need to cap the depth
+    pub terminal_branches: Vec<usize>,
+    /// all branches of this rule are terminal
+    pub purely_terminal: bool,
 }
 
 #[allow(dead_code)]
 #[derive(Debug)]
+pub struct Branch {
+    pub weight: u8,
+    pub expr: Expression,
+}
+
+// TODO: Would be more efficient to store the AST in an arena, though may not really in this
+// simple case
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
 pub enum Expression {
     Terminal(Term),
     Func1 {
@@ -42,7 +52,15 @@ pub enum Expression {
     ToBeReplaced {
         rule: String,
     },
-    Debug(String),
+}
+
+impl Expression {
+    fn get_replace_rule(&self) -> String {
+        match self {
+            Expression::ToBeReplaced { rule } => rule.clone(),
+            _ => panic!("This method can only be used on replace variants."),
+        }
+    }
 }
 
 lazy_static! {
@@ -52,7 +70,7 @@ lazy_static! {
             .collect();
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Term {
     RandConst,
     /// horizontal parameter ranging in [0,1]
@@ -68,7 +86,7 @@ pub enum Term {
 
 impl Term {
     fn from_str(ident: &str) -> Option<Self> {
-        match ident.to_lowercase().as_str() {
+        match ident {
             "rand" | "random" => Some(Self::RandConst),
             "u" => Some(Self::U),
             "v" => Some(Self::V),
@@ -152,26 +170,59 @@ pub enum ParseFail {
         got: usize,
     },
     FunctionNotWhitelisted(String),
+    NoRulesFound,
+    /// required to be able to limit depth
+    NoTerminalReplacementInChannelRule,
 }
 
-pub fn parse_rewrite_rules(mut i: &[u8]) -> Result<HashMap<String, RewriteRule>, ParseFail> {
+pub fn parse_rewrite_rules(
+    mut i: &[u8],
+) -> Result<(HashMap<String, RewriteRule>, String), ParseFail> {
     i = eat_whitespace_and_comments(i);
     let mut hs = HashMap::new();
+    let mut crule = None;
+    let mut purely_terminal = HashSet::new();
     while !i.is_empty() {
         let (i_, (ident, rule)) = parse_rewrite_rule(i)?;
+        if crule.is_none() {
+            // NOTE: First rule becomes the color channel rule
+            crule = Some(ident.clone());
+        }
         i = eat_whitespace_and_comments(i_);
+        if rule.purely_terminal {
+            purely_terminal.insert(ident.clone());
+        }
         hs.insert(ident, rule);
     }
-    Ok(hs)
+    for rule in hs.values_mut() {
+        let filtered_tb: Vec<_> = rule
+            .terminal_branches
+            .iter()
+            .filter(|i| {
+                let tr = rule.branches[**i].expr.get_replace_rule();
+                purely_terminal.contains(&tr)
+            })
+            .cloned()
+            .collect();
+        rule.terminal_branches = filtered_tb;
+    }
+    match crule {
+        Some(crule) => match hs.get(&crule).unwrap().terminal_branches.is_empty() {
+            true => Err(ParseFail::NoTerminalReplacementInChannelRule),
+            false => Ok((hs, crule)),
+        },
+        None => Err(ParseFail::NoRulesFound),
+    }
 }
 
 fn parse_rewrite_rule(mut i: &[u8]) -> PResult<(String, RewriteRule)> {
     let (i_, rule_ident) = alphanumeric0::<_, ()>(i).map_err(|_| ParseFail::ExpectedIdentifier)?;
     let rule_ident = utf8str(rule_ident);
-    dbg!(&rule_ident);
     i = i_;
 
     let mut branches = vec![];
+    let mut terminal_branches = vec![];
+    let mut purely_terminal = true;
     loop {
         i = eat_whitespace_and_comments(i);
         match char::<_, ()>(';').parse(i) {
@@ -182,11 +233,25 @@ fn parse_rewrite_rule(mut i: &[u8]) -> PResult<(String, RewriteRule)> {
             Err(_) => {
                 let (i_, branch) = parse_branch(i)?;
                 i = i_;
+                if matches!(&branch.expr, Expression::ToBeReplaced { .. }) {
+                    // NOTE: at these points these are just candidates, they need to be filtered
+                    terminal_branches.push(branches.len());
+                }
+                if !matches!(&branch.expr, Expression::Terminal { .. }) {
+                    purely_terminal = false;
+                }
                 branches.push(branch);
             }
         }
     }
-    let out = (rule_ident, RewriteRule(branches));
+    let out = (
+        rule_ident,
+        RewriteRule {
+            branches,
+            terminal_branches,
+            purely_terminal,
+        },
+    );
     Ok((i, out))
 }
 
@@ -245,9 +310,8 @@ fn parse_expr(mut i: &[u8]) -> PResult<Expression> {
         ParseBracketsOutcome::Success(i) => {
             let argsi = split_arglist(i);
             let mut args = vec![];
-            for (j, i) in argsi.into_iter().enumerate() {
-                println!("Invalid expr as arg {j} of {ident}"); // TODO: Log more verbose info
-                let (_, arg) = parse_expr(i)?;
+            for i in argsi.into_iter() {
+                let (_, arg) = parse_expr(i)?; // TODO: if expression parse fail, give context
                 args.push(Box::new(arg))
             }
             let expr = match args.len() {

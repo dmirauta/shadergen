@@ -1,14 +1,14 @@
 # Color channel
-C ||  T
+C |  T
   ||| add(C, C)
   ||| mult(C, C)
   ||| mult(C, mult(C,C))
   | sqrt( abs ( C ) )
   # ||| abs(C)
-  #||| sin(C)
+  ||| sin(C)
   ;
 
-# Terminal
+# Terminal (should be lower case, otherwise may be confused with replace a rule ident)
 T | random
   | u
   | v
