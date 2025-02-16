@@ -171,6 +171,7 @@ pub enum ParseFail {
     NoRulesFound,
     /// required to be able to limit depth
     NoTerminalReplacementInChannelRule,
+    ExpectedBarsOrSemicolon,
 }
 
 pub struct RewriteRules {
@@ -264,7 +265,7 @@ fn parse_rewrite_rule(mut i: &[u8]) -> PResult<(String, RewriteRule)> {
 fn parse_branch(i: &[u8]) -> PResult<Branch> {
     let (mut i, bars) = take_while1::<_, _, ()>(|u: u8| u.as_char() == '|')
         .parse(i)
-        .unwrap();
+        .map_err(|_| ParseFail::ExpectedBarsOrSemicolon)?;
     let weight = bars.len() as u8;
     i = eat_whitespace_and_comments(i);
     let (mut i, in_branch) =
