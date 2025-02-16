@@ -23,7 +23,6 @@ pub struct RewriteRule {
     pub purely_terminal: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct Branch {
     pub weight: u8,
@@ -33,7 +32,6 @@ pub struct Branch {
 // TODO: Would be more efficient to store the AST in an arena, though may not really in this
 // simple case
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum Expression {
     Terminal(Term),
@@ -175,26 +173,29 @@ pub enum ParseFail {
     NoTerminalReplacementInChannelRule,
 }
 
-pub fn parse_rewrite_rules(
-    mut i: &[u8],
-) -> Result<(HashMap<String, RewriteRule>, String), ParseFail> {
+pub struct RewriteRules {
+    pub rules: HashMap<String, RewriteRule>,
+    pub entry_point: String,
+}
+
+pub fn parse_rewrite_rules(mut i: &[u8]) -> Result<RewriteRules, ParseFail> {
     i = eat_whitespace_and_comments(i);
-    let mut hs = HashMap::new();
-    let mut crule = None;
+    let mut rules = HashMap::new();
+    let mut entry_point = None;
     let mut purely_terminal = HashSet::new();
     while !i.is_empty() {
         let (i_, (ident, rule)) = parse_rewrite_rule(i)?;
-        if crule.is_none() {
+        if entry_point.is_none() {
             // NOTE: First rule becomes the color channel rule
-            crule = Some(ident.clone());
+            entry_point = Some(ident.clone());
         }
         i = eat_whitespace_and_comments(i_);
         if rule.purely_terminal {
             purely_terminal.insert(ident.clone());
         }
-        hs.insert(ident, rule);
+        rules.insert(ident, rule);
     }
-    for rule in hs.values_mut() {
+    for rule in rules.values_mut() {
         let filtered_tb: Vec<_> = rule
             .terminal_branches
             .iter()
@@ -206,10 +207,15 @@ pub fn parse_rewrite_rules(
             .collect();
         rule.terminal_branches = filtered_tb;
     }
-    match crule {
-        Some(crule) => match hs.get(&crule).unwrap().terminal_branches.is_empty() {
+    match entry_point {
+        Some(entry_point) => match rules
+            .get(&entry_point)
+            .unwrap()
+            .terminal_branches
+            .is_empty()
+        {
             true => Err(ParseFail::NoTerminalReplacementInChannelRule),
-            false => Ok((hs, crule)),
+            false => Ok(RewriteRules { rules, entry_point }),
         },
         None => Err(ParseFail::NoRulesFound),
     }
