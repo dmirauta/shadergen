@@ -1,20 +1,27 @@
+use std::sync::{Arc, Mutex};
+
 use egui_inspect::{
-    eframe::{self, CreationContext},
-    egui::{self, text::LayoutJob, CentralPanel, ScrollArea},
-    logging::{
-        log::{self, error, info, warn},
-        setup_mixed_logger, FileLogOption, LogsView,
+    eframe::{
+        self, egui_glow,
+        glow::{self, HasContext},
+        CreationContext,
     },
-    utils::type_name_base,
+    egui::{self, text::LayoutJob, vec2, CentralPanel, LayerId, ScrollArea, Sense, Shape, Window},
+    logging::{
+        default_mixed_logger,
+        log::{self, error, info, warn},
+        LogsView,
+    },
     EframeMain, EguiInspect, InspectNumber,
 };
 use parser::{parse_rewrite_rules, Expression, RewriteRules};
-use ui::{CodeEdit, EguiFragShaderPreview};
+use ui::CodeEdit;
+use viewport_quad::ViewportQuad;
 
 mod funcgen;
 mod parser;
-mod render_to_tex;
 mod ui;
+mod viewport_quad;
 
 struct GeneratedFunc {
     generated: Box<Expression>,
@@ -84,23 +91,24 @@ struct ShaderGen {
     generated_g: GeneratedFunc,
     generated_b: GeneratedFunc,
     feedback: LogsView,
-    gl_viewport: EguiFragShaderPreview,
+    gl_viewport: Arc<Mutex<ViewportQuad>>,
+    t: f32,
 }
 
 static DEFAULT_GRAMMAR: &str = include_str!("../grammar.bnf");
 static DEFAULT_FRAG: &str = include_str!("../default_frag.glsl");
+const ASPECT: f32 = 9.0 / 16.0;
 
 impl ShaderGen {
     fn init(cc: &CreationContext) -> Self {
-        setup_mixed_logger(FileLogOption::DefaultTempDir {
-            log_name: format!("{}_log", type_name_base::<Self>()),
-        });
+        default_mixed_logger::<Self>();
         let gcode = DEFAULT_GRAMMAR.to_string();
         let grammar = CodeEdit::new(gcode, "".to_string());
         let fcode = DEFAULT_FRAG.to_string();
         let frag = CodeEdit::new(fcode, "c".to_string()); // not c, but it will have to do...
         let grammar_bytes = DEFAULT_GRAMMAR.as_bytes();
         let rr = parse_rewrite_rules(grammar_bytes).unwrap();
+        let gl = cc.gl.as_ref().unwrap().clone();
         Self {
             grammar,
             frag,
@@ -110,7 +118,8 @@ impl ShaderGen {
             generated_g: Default::default(),
             generated_b: Default::default(),
             feedback: Default::default(),
-            gl_viewport: EguiFragShaderPreview::init(cc, DEFAULT_FRAG),
+            gl_viewport: Arc::new(Mutex::new(ViewportQuad::new(&gl, DEFAULT_FRAG))),
+            t: 0.0,
         }
     }
     fn _insert_channel_funcs(&mut self) -> Option<()> {
@@ -136,71 +145,57 @@ impl ShaderGen {
     }
     fn compile_shader(&mut self, frame: &mut eframe::Frame) {
         if let Some(gl) = frame.gl() {
-            if let Err(e) = self.gl_viewport.quad.set_frag_shader(gl, &self.frag.code) {
+            if let Err(e) = self
+                .gl_viewport
+                .lock()
+                .unwrap()
+                .set_frag_shader(gl, &self.frag.code)
+            {
                 error!("Failed to compile frag shader: {e}");
             }
         }
     }
+    fn paint_viewport(&self, ui: &mut egui::Ui) {
+        let available = ui.available_size();
+        let size = match available.y / ASPECT < available.x {
+            true => vec2(available.y / ASPECT, available.y),
+            false => vec2(available.x, available.x * ASPECT),
+        };
+        let (rect, _) = ui.allocate_exact_size(size, Sense::empty());
+
+        let t = self.t;
+        let view = self.gl_viewport.clone();
+        ui.ctx()
+            .layer_painter(LayerId::background())
+            .add(Shape::Callback(egui::PaintCallback {
+                rect,
+                callback: Arc::new(egui_glow::CallbackFn::new(move |_, painter| {
+                    if let Ok(vp) = view.try_lock() {
+                        let gl = painter.gl();
+                        unsafe {
+                            pogle!(gl, gl.use_program(vp.prog));
+                            pogle!(gl, gl.bind_vertex_array(Some(vp.va)));
+
+                            if let Some(prog) = vp.prog {
+                                let loc = pogle!(gl, gl.get_uniform_location(prog, "t"));
+                                pogle!(gl, gl.uniform_1_f32(loc.as_ref(), t));
+                            }
+
+                            pogle!(gl, gl.draw_arrays(glow::TRIANGLES, 0, 3));
+                        }
+                    }
+                })),
+            }));
+    }
 }
 
 static RGB_DECL_WARN: &str = "Inserting functions into shader failed, please keep the formatting of the r,g,b declarations similar to the default shader (no additional spacing between tokens, each kept on one line, not declared twice, even in other functions).";
+static WASM_TIME_NOTE: &str = "Note: SystemTime::now() is not available on web, so just use this slider to change the shader uniform for now.";
 
 impl eframe::App for ShaderGen {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         CentralPanel::default().show(ctx, |ui| {
-            ui.columns(2, |cols| {
-                let ui = &mut cols[0];
-                self.feedback.inspect("Feedback:", ui);
-                self.grammar.inspect_mut("Grammar: ", ui);
-
-                // HACK: single buttons have been put in hboxes to stop them taking up full
-                // width
-                ui.horizontal(|ui| {
-                    if ui.button("parse grammar").clicked() {
-                        let grammar_bytes = self.grammar.code.as_bytes();
-                        match parse_rewrite_rules(grammar_bytes) {
-                            Ok(rr) => {
-                                self.rr = rr;
-                                log::info!("Succesfully parsed grammar.");
-                            }
-                            Err(e) => {
-                                // TODO: log feedback
-                                log::error!("Parse error: {e:?}");
-                            }
-                        }
-                    }
-                });
-                ui.horizontal(|ui| {
-                    self.max_depth
-                        .inspect_with_slider("max_depth", ui, 5.0, 25.0);
-                    if ui.button("generate channel functions").clicked() {
-                        self.generate_funcs();
-                    }
-                });
-                self.generated_r.inspect("r", ui);
-                self.generated_g.inspect("g", ui);
-                self.generated_b.inspect("b", ui);
-
-                ui.horizontal(|ui| {
-                    if ui.button("insert funcs into shader code").clicked() {
-                        self.insert_channel_funcs();
-                    }
-                    if ui.button("reset shader code to default").clicked() {
-                        self.frag.code = DEFAULT_FRAG.to_string();
-                    }
-                });
-
-                self.frag.inspect_mut("Fragment: ", ui);
-
-                ui.horizontal(|ui| {
-                    if ui.button("compile shader").clicked() {
-                        self.compile_shader(frame);
-                    }
-                });
-
-                let ui = &mut cols[1];
-                self.gl_viewport._update(ui, frame);
-
+            ui.horizontal(|ui| {
                 ui.horizontal(|ui| {
                     if ui.button("generate, insert and compile").clicked() {
                         self.generate_funcs();
@@ -212,6 +207,58 @@ impl eframe::App for ShaderGen {
                 .on_hover_text(
                     "Apply the actions on the left all in one step, without editing intermediates.",
                 );
+                self.t.inspect_with_slider("t", ui, 0.0, 100.0);
+                ui.label(WASM_TIME_NOTE);
+            });
+            self.paint_viewport(ui);
+        });
+        Window::new("Grammar and shader generation intermediates").show(ctx, |ui| {
+            self.feedback.inspect("Feedback:", ui);
+            self.grammar.inspect_mut("Grammar: ", ui);
+
+            // HACK: single buttons have been put in hboxes to stop them taking up full
+            // width
+            ui.horizontal(|ui| {
+                if ui.button("parse grammar").clicked() {
+                    let grammar_bytes = self.grammar.code.as_bytes();
+                    match parse_rewrite_rules(grammar_bytes) {
+                        Ok(rr) => {
+                            self.rr = rr;
+                            log::info!("Succesfully parsed grammar.");
+                        }
+                        Err(e) => {
+                            // TODO: log feedback
+                            log::error!("Parse error: {e:?}");
+                        }
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                self.max_depth
+                    .inspect_with_slider("max_depth", ui, 5.0, 25.0);
+                if ui.button("generate channel functions").clicked() {
+                    self.generate_funcs();
+                }
+            });
+            self.generated_r.inspect("r", ui);
+            self.generated_g.inspect("g", ui);
+            self.generated_b.inspect("b", ui);
+
+            ui.horizontal(|ui| {
+                if ui.button("insert funcs into shader code").clicked() {
+                    self.insert_channel_funcs();
+                }
+                if ui.button("reset shader code to default").clicked() {
+                    self.frag.code = DEFAULT_FRAG.to_string();
+                }
+            });
+
+            self.frag.inspect_mut("Fragment: ", ui);
+
+            ui.horizontal(|ui| {
+                if ui.button("compile shader").clicked() {
+                    self.compile_shader(frame);
+                }
             });
         });
     }
