@@ -102,6 +102,7 @@ const ASPECT: f32 = 9.0 / 16.0;
 impl ShaderGen {
     fn init(cc: &CreationContext) -> Self {
         default_mixed_logger::<Self>();
+        info!("Note: currently starting with the same random seed each time.");
         let gcode = DEFAULT_GRAMMAR.to_string();
         let grammar = CodeEdit::new(gcode, "".to_string());
         let fcode = DEFAULT_FRAG.to_string();

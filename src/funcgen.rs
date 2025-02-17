@@ -1,6 +1,8 @@
+use lazy_static::lazy_static;
+use rand::{rngs::StdRng, Rng, SeedableRng};
+
 use crate::parser::{Expression, RewriteRule, RewriteRules};
-use rand::{rng, Rng};
-use std::{collections::HashMap, fmt::Write};
+use std::{collections::HashMap, fmt::Write, sync::RwLock};
 
 fn weighted_pick(weights: &[u16], cidx: u16) -> Option<usize> {
     let cumsum: Vec<u16> = (0..=weights.len())
@@ -13,17 +15,21 @@ fn weighted_pick(weights: &[u16], cidx: u16) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
+lazy_static! {
+    static ref RNG: RwLock<StdRng> = RwLock::new(StdRng::from_seed([0; 32]));
+}
+
 impl RewriteRule {
     pub fn choose_random(&self) -> Expression {
         let weights: Vec<u16> = self.branches.iter().map(|b| b.weight as u16).collect();
         let weights_total: u16 = weights.iter().cloned().sum();
-        let mut rcidx: u16 = rng().random();
+        let mut rcidx: u16 = RNG.write().unwrap().random();
         rcidx %= weights_total;
         let ridx = weighted_pick(&weights, rcidx).unwrap();
         self.branches[ridx].expr.clone()
     }
     fn choose_terminal(&self, rules: &HashMap<String, RewriteRule>) -> Expression {
-        let rii: u8 = rng().random();
+        let rii: u8 = RNG.write().unwrap().random();
         let rii = (rii as usize) % self.terminal_branches.len();
         // TODO: ^effectively using uniform weights here rather than whats defined in the grammar...
         let ridx = self.terminal_branches[rii];
@@ -106,7 +112,7 @@ impl Expression {
         match self {
             Expression::Terminal(term) => match term {
                 crate::parser::Term::RandConst => {
-                    let r: f32 = rng().random();
+                    let r: f32 = RNG.write().unwrap().random();
                     _ = buff.write_fmt(format_args!("{r:.2}"));
                 }
                 crate::parser::Term::U => _ = buff.write_str("u"),

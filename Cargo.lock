@@ -2654,6 +2654,7 @@ dependencies = [
  "lazy_static",
  "nom",
  "rand 0.9.0",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]
