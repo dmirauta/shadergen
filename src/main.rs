@@ -6,7 +6,10 @@ use egui_inspect::{
         glow::{self, HasContext},
         CreationContext,
     },
-    egui::{self, text::LayoutJob, vec2, CentralPanel, LayerId, ScrollArea, Sense, Shape, Window},
+    egui::{
+        self, text::LayoutJob, vec2, CentralPanel, LayerId, ScrollArea, Sense, Shape, TextEdit,
+        Window,
+    },
     logging::{
         default_mixed_logger,
         log::{self, error, info, warn},
@@ -14,7 +17,10 @@ use egui_inspect::{
     },
     EframeMain, EguiInspect, InspectNumber,
 };
+use funcgen::{RNG, SRNG};
 use parser::{parse_rewrite_rules, Expression, RewriteRules};
+use rand::{Rng, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 use ui::CodeEdit;
 use viewport_quad::ViewportQuad;
 
@@ -92,7 +98,13 @@ struct ShaderGen {
     generated_b: GeneratedFunc,
     feedback: LogsView,
     gl_viewport: Arc<Mutex<ViewportQuad>>,
-    t: f32,
+    next_seed: u64,
+    next_seed_str: String,
+    last_seed: Option<u64>,
+    t: f64,
+    t_max: f64,
+    play: bool,
+    advancing: bool,
 }
 
 static DEFAULT_GRAMMAR: &str = include_str!("../grammar.bnf");
@@ -102,7 +114,6 @@ const ASPECT: f32 = 9.0 / 16.0;
 impl ShaderGen {
     fn init(cc: &CreationContext) -> Self {
         default_mixed_logger::<Self>();
-        info!("Note: currently starting with the same random seed each time.");
         let gcode = DEFAULT_GRAMMAR.to_string();
         let grammar = CodeEdit::new(gcode, "".to_string());
         let fcode = DEFAULT_FRAG.to_string();
@@ -120,7 +131,13 @@ impl ShaderGen {
             generated_b: Default::default(),
             feedback: Default::default(),
             gl_viewport: Arc::new(Mutex::new(ViewportQuad::new(&gl, DEFAULT_FRAG))),
+            next_seed: 0,
+            next_seed_str: "0".to_string(),
+            last_seed: None,
             t: 0.0,
+            t_max: 10.0,
+            play: true,
+            advancing: true,
         }
     }
     fn _insert_channel_funcs(&mut self) -> Option<()> {
@@ -135,9 +152,14 @@ impl ShaderGen {
         Some(())
     }
     fn generate_funcs(&mut self) {
+        self.last_seed = Some(self.next_seed);
+        *RNG.write().unwrap() = ChaCha8Rng::seed_from_u64(self.next_seed);
         self.generated_r.regen(&self.rr, self.max_depth);
         self.generated_g.regen(&self.rr, self.max_depth);
         self.generated_b.regen(&self.rr, self.max_depth);
+        // advance seed for next time
+        self.next_seed = SRNG.write().unwrap().random();
+        self.next_seed_str = format!("{}", self.next_seed);
     }
     fn insert_channel_funcs(&mut self) {
         if self._insert_channel_funcs().is_none() {
@@ -179,7 +201,7 @@ impl ShaderGen {
 
                             if let Some(prog) = vp.prog {
                                 let loc = pogle!(gl, gl.get_uniform_location(prog, "t"));
-                                pogle!(gl, gl.uniform_1_f32(loc.as_ref(), t));
+                                pogle!(gl, gl.uniform_1_f32(loc.as_ref(), t as f32));
                             }
 
                             pogle!(gl, gl.draw_arrays(glow::TRIANGLES, 0, 3));
@@ -191,25 +213,56 @@ impl ShaderGen {
 }
 
 static RGB_DECL_WARN: &str = "Inserting functions into shader failed, please keep the formatting of the r,g,b declarations similar to the default shader (no additional spacing between tokens, each kept on one line, not declared twice, even in other functions).";
-static WASM_TIME_NOTE: &str = "Note: SystemTime::now() is not available on web, so just use this slider to change the shader uniform for now.";
 
 impl eframe::App for ShaderGen {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         CentralPanel::default().show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.horizontal(|ui| {
-                    if ui.button("generate, insert and compile").clicked() {
-                        self.generate_funcs();
-                        self.insert_channel_funcs();
-                        self.compile_shader(frame);
+            ui.ctx().request_repaint();
+            if self.play {
+                if self.advancing {
+                    self.t += ui.input(|i| i.stable_dt as f64) * self.t_max / 3.0;
+                } else {
+                    self.t -= ui.input(|i| i.stable_dt as f64) * self.t_max / 3.0;
+                }
+            }
+            if self.t > self.t_max {
+                self.t = self.t_max;
+                self.advancing = !self.advancing;
+            }
+            if self.t < 0.0 {
+                self.t = 0.0;
+                self.advancing = !self.advancing;
+            }
+
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("generate, insert and compile").clicked() {
+                    self.generate_funcs();
+                    self.insert_channel_funcs();
+                    self.compile_shader(frame);
+                }
+                self.play.inspect_mut("play", ui);
+                self.t.inspect_with_slider("t", ui, 0.0, self.t_max as f32);
+                self.t_max.inspect_mut("slider t_max", ui);
+
+                ui.label("next seed:");
+                if ui
+                    .add(
+                        TextEdit::singleline(&mut self.next_seed_str)
+                            .char_limit(64)
+                            .desired_width(150.0),
+                    )
+                    .changed()
+                {
+                    match self.next_seed_str.parse::<u64>() {
+                        Ok(v) => self.next_seed = v,
+                        Err(_) => self.next_seed_str = format!("{}", self.next_seed),
                     }
-                })
-                .response
-                .on_hover_text(
-                    "Apply the actions on the left all in one step, without editing intermediates.",
-                );
-                self.t.inspect_with_slider("t", ui, 0.0, 100.0);
-                ui.label(WASM_TIME_NOTE);
+                }
+
+                match self.last_seed {
+                    Some(ls) => ui.label(format!("last seed: {ls}")),
+                    None => ui.label("last seed: no generation has happened yet"),
+                };
             });
             self.paint_viewport(ui);
         });

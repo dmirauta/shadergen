@@ -1,5 +1,6 @@
 use lazy_static::lazy_static;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 
 use crate::parser::{Expression, RewriteRule, RewriteRules};
 use std::{collections::HashMap, fmt::Write, sync::RwLock};
@@ -16,7 +17,8 @@ fn weighted_pick(weights: &[u16], cidx: u16) -> Option<usize> {
 }
 
 lazy_static! {
-    static ref RNG: RwLock<StdRng> = RwLock::new(StdRng::from_seed([0; 32]));
+    pub static ref SRNG: RwLock<ChaCha8Rng> = RwLock::new(ChaCha8Rng::seed_from_u64(0));
+    pub static ref RNG: RwLock<ChaCha8Rng> = RwLock::new(ChaCha8Rng::seed_from_u64(0));
 }
 
 impl RewriteRule {

@@ -6,15 +6,12 @@ edition = "2021"
 [dependencies]
 lazy_static = "1.5.0"
 nom = "8.0.0"
-rand = { version = "0.9.0", default_features = false, features = [
-  "small_rng",
-  "std",
-  "std_rng",
-] }
+rand = { version = "0.9.0", default_features = false }
 egui_inspect = { git = "https://github.com/dmirauta/egui_inspect", branch = "0_31", features = [
   "logging",
 ] }
 egui_extras = "0.31"
+rand_chacha = "0.9.0"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = "0.4"
