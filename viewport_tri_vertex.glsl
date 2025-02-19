@@ -11,6 +11,8 @@ out vec2 uv;
 
 void main() {
     vec2 vert = verts[gl_VertexID];
-    uv = (vert+1.0)/2.0; // creates [0,1]x[0,1] range in the visible portion (whole tex)
+    // uv = (vert+1.0)/2.0; // creates [0,1]x[0,1] range in the visible portion (whole tex)
+    // on second though, allow the rect to be parameterised by the original [-1,1]x[-1,1]
+    uv = vert;
     gl_Position = vec4(vert, 0.0, 1.0);
 }

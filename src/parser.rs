@@ -62,14 +62,22 @@ impl Expression {
 }
 
 lazy_static! {
-    static ref FUNCTION_WHITELIST: HashMap<&'static str, usize> =
-        [("abs", 1), ("sqrt", 1), ("sin", 1), ("add", 2), ("mult", 2),]
-            .into_iter()
-            .collect();
+    static ref FUNCTION_WHITELIST: HashMap<&'static str, usize> = [
+        ("abs", 1),
+        ("exp", 1),
+        ("sqrt", 1),
+        ("sin", 1),
+        ("add", 2),
+        ("mult", 2),
+        ("sig", 3)
+    ]
+    .into_iter()
+    .collect();
 }
 
 #[derive(Debug, Clone)]
 pub enum Term {
+    // TODO: allow for specifying random number range in grammar, perhaps with square brackets?
     RandConst,
     /// horizontal parameter ranging in [0,1]
     U,

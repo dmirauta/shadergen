@@ -88,7 +88,6 @@ fn find_var_decl_line(code: &str, var: &str) -> Option<usize> {
 #[derive(EframeMain)]
 #[eframe_main(no_eframe_app_derive, init = "ShaderGen::init(_cc)")]
 struct ShaderGen {
-    // TODO: not much different from multiline without highlighting...
     grammar: CodeEdit,
     frag: CodeEdit,
     rr: RewriteRules,
@@ -97,10 +96,11 @@ struct ShaderGen {
     generated_g: GeneratedFunc,
     generated_b: GeneratedFunc,
     feedback: LogsView,
+    gl: Arc<glow::Context>,
     gl_viewport: Arc<Mutex<ViewportQuad>>,
     next_seed: u64,
     next_seed_str: String,
-    last_seed: Option<u64>,
+    last_seed: u64,
     t: f64,
     t_max: f64,
     play: bool,
@@ -115,13 +115,15 @@ impl ShaderGen {
     fn init(cc: &CreationContext) -> Self {
         default_mixed_logger::<Self>();
         let gcode = DEFAULT_GRAMMAR.to_string();
+        // TODO: not much different from multiline without highlighting...
         let grammar = CodeEdit::new(gcode, "".to_string());
         let fcode = DEFAULT_FRAG.to_string();
         let frag = CodeEdit::new(fcode, "c".to_string()); // not c, but it will have to do...
         let grammar_bytes = DEFAULT_GRAMMAR.as_bytes();
         let rr = parse_rewrite_rules(grammar_bytes).unwrap();
         let gl = cc.gl.as_ref().unwrap().clone();
-        Self {
+        let next_seed = SRNG.write().unwrap().random();
+        let mut new = Self {
             grammar,
             frag,
             rr,
@@ -131,28 +133,36 @@ impl ShaderGen {
             generated_b: Default::default(),
             feedback: Default::default(),
             gl_viewport: Arc::new(Mutex::new(ViewportQuad::new(&gl, DEFAULT_FRAG))),
-            next_seed: 0,
-            next_seed_str: "0".to_string(),
-            last_seed: None,
+            gl,
+            next_seed_str: format!("{next_seed}"),
+            next_seed,
+            last_seed: 0,
             t: 0.0,
             t_max: 10.0,
             play: true,
             advancing: true,
-        }
+        };
+        new.generate_funcs();
+        new.insert_channel_funcs();
+        new.compile_shader();
+        new
     }
     fn _insert_channel_funcs(&mut self) -> Option<()> {
-        let rdec = find_var_decl_line(&self.frag.code, "r")?;
-        let gdec = find_var_decl_line(&self.frag.code, "g")?;
-        let bdec = find_var_decl_line(&self.frag.code, "b")?;
-        let mut lines: Vec<_> = self.frag.code.lines().map(|l| l.to_string()).collect();
-        lines[rdec] = format!("    float r = {};", &self.generated_r.generated_str);
-        lines[gdec] = format!("    float g = {};", &self.generated_g.generated_str);
-        lines[bdec] = format!("    float b = {};", &self.generated_b.generated_str);
+        let rdec = find_var_decl_line(&self.frag.code, "red")?;
+        let gdec = find_var_decl_line(&self.frag.code, "green")?;
+        let bdec = find_var_decl_line(&self.frag.code, "blue")?;
+        let mut lines: Vec<_> = self.frag.code.lines().collect();
+        let rline = format!("    float red = {};", &self.generated_r.generated_str);
+        let gline = format!("    float green = {};", &self.generated_g.generated_str);
+        let bline = format!("    float blue = {};", &self.generated_b.generated_str);
+        lines[rdec] = rline.as_str();
+        lines[gdec] = gline.as_str();
+        lines[bdec] = bline.as_str();
         self.frag.code = lines.join("\n");
         Some(())
     }
     fn generate_funcs(&mut self) {
-        self.last_seed = Some(self.next_seed);
+        self.last_seed = self.next_seed;
         *RNG.write().unwrap() = ChaCha8Rng::seed_from_u64(self.next_seed);
         self.generated_r.regen(&self.rr, self.max_depth);
         self.generated_g.regen(&self.rr, self.max_depth);
@@ -166,16 +176,14 @@ impl ShaderGen {
             warn!("{}", RGB_DECL_WARN);
         }
     }
-    fn compile_shader(&mut self, frame: &mut eframe::Frame) {
-        if let Some(gl) = frame.gl() {
-            if let Err(e) = self
-                .gl_viewport
-                .lock()
-                .unwrap()
-                .set_frag_shader(gl, &self.frag.code)
-            {
-                error!("Failed to compile frag shader: {e}");
-            }
+    fn compile_shader(&mut self) {
+        if let Err(e) = self
+            .gl_viewport
+            .lock()
+            .unwrap()
+            .set_frag_shader(&self.gl, &self.frag.code)
+        {
+            error!("Failed to compile frag shader: {e}");
         }
     }
     fn paint_viewport(&self, ui: &mut egui::Ui) {
@@ -215,7 +223,7 @@ impl ShaderGen {
 static RGB_DECL_WARN: &str = "Inserting functions into shader failed, please keep the formatting of the r,g,b declarations similar to the default shader (no additional spacing between tokens, each kept on one line, not declared twice, even in other functions).";
 
 impl eframe::App for ShaderGen {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         CentralPanel::default().show(ctx, |ui| {
             ui.ctx().request_repaint();
             if self.play {
@@ -238,7 +246,7 @@ impl eframe::App for ShaderGen {
                 if ui.button("generate, insert and compile").clicked() {
                     self.generate_funcs();
                     self.insert_channel_funcs();
-                    self.compile_shader(frame);
+                    self.compile_shader();
                 }
                 self.play.inspect_mut("play", ui);
                 self.t.inspect_with_slider("t", ui, 0.0, self.t_max as f32);
@@ -259,10 +267,7 @@ impl eframe::App for ShaderGen {
                     }
                 }
 
-                match self.last_seed {
-                    Some(ls) => ui.label(format!("last seed: {ls}")),
-                    None => ui.label("last seed: no generation has happened yet"),
-                };
+                ui.label(format!("last seed: {}", self.last_seed));
             });
             self.paint_viewport(ui);
         });
@@ -311,7 +316,7 @@ impl eframe::App for ShaderGen {
 
             ui.horizontal(|ui| {
                 if ui.button("compile shader").clicked() {
-                    self.compile_shader(frame);
+                    self.compile_shader();
                 }
             });
         });

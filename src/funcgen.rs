@@ -114,7 +114,9 @@ impl Expression {
         match self {
             Expression::Terminal(term) => match term {
                 crate::parser::Term::RandConst => {
-                    let r: f32 = RNG.write().unwrap().random();
+                    let mut r: f32 = RNG.write().unwrap().random();
+                    r *= 2.0;
+                    r -= 1.0;
                     _ = buff.write_fmt(format_args!("{r:.2}"));
                 }
                 crate::parser::Term::U => _ = buff.write_str("u"),
