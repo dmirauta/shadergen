@@ -5,8 +5,7 @@ edition = "2021"
 
 [dependencies]
 lazy_static = "1.5.0"
-nom = "8.0.0"
-rand = { version = "0.9.0", default_features = false }
+rand = { version = "0.9.0", default-features = false }
 egui_inspect = { git = "https://github.com/dmirauta/egui_inspect", branch = "0_31", features = [
   "logging",
 ] }

@@ -26,6 +26,7 @@ use viewport_quad::ViewportQuad;
 
 mod funcgen;
 mod parser;
+mod tokeniser;
 mod ui;
 mod viewport_quad;
 
@@ -119,8 +120,7 @@ impl ShaderGen {
         let grammar = CodeEdit::new(gcode, "".to_string());
         let fcode = DEFAULT_FRAG.to_string();
         let frag = CodeEdit::new(fcode, "c".to_string()); // not c, but it will have to do...
-        let grammar_bytes = DEFAULT_GRAMMAR.as_bytes();
-        let rr = parse_rewrite_rules(grammar_bytes).unwrap();
+        let rr = parse_rewrite_rules(DEFAULT_GRAMMAR).unwrap();
         let gl = cc.gl.as_ref().unwrap().clone();
         let next_seed = SRNG.write().unwrap().random();
         let mut new = Self {
@@ -279,14 +279,12 @@ impl eframe::App for ShaderGen {
             // width
             ui.horizontal(|ui| {
                 if ui.button("parse grammar").clicked() {
-                    let grammar_bytes = self.grammar.code.as_bytes();
-                    match parse_rewrite_rules(grammar_bytes) {
+                    match parse_rewrite_rules(&self.grammar.code) {
                         Ok(rr) => {
                             self.rr = rr;
                             log::info!("Succesfully parsed grammar.");
                         }
                         Err(e) => {
-                            // TODO: log feedback
                             log::error!("Parse error: {e:?}");
                         }
                     }
